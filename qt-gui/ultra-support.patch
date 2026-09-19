@@ -1,0 +1,255 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 127ff22..06e367f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,6 +26,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
+         assets/mouse-2.png
+         mouse_model_display.qrc
+         hook.h hook.cpp
++        ultra.h ultra.cpp
+         settings.h settings.cpp settings.ui
+ 
+ 
+diff --git a/atsx11.cpp b/atsx11.cpp
+index eaf4542..12e15d1 100644
+--- a/atsx11.cpp
++++ b/atsx11.cpp
+@@ -5,8 +5,10 @@
+ #include <QIcon>
+ #include <QSettings>
+ #include <QStyle>
++#include <QTimer>
+ #include <QtConcurrent/QtConcurrent>
+ #include "hook.h"
++#include "ultra.h"
+ #include "settings.h"
+ 
+ 
+@@ -31,7 +33,10 @@ atsx11::atsx11(QWidget *parent)
+     ui->lbl_isCharging->setEnabled(false);
+     ui->btn_apply->setEnabled(false);
+ 
+-    loadSettings();
++    // Prefer the Ultra if one is attached: it is a different device on a
++    // different protocol, and the X11 path cannot talk to it at all.
++    if (!detectUltra())
++        loadSettings();
+ }
+ 
+ atsx11::~atsx11()
+@@ -53,6 +58,127 @@ void atsx11::updateInfoLabels()
+     ui->lbl_activeAngleSnapValue->setText(ui->chbox_anglesnap->isChecked() ? QStringLiteral("On") : QStringLiteral("Off"));
+ }
+ 
++bool atsx11::detectUltra()
++{
++    m_ultraPath = ultra::findDevice();
++    if (m_ultraPath.isEmpty())
++        return false;
++
++    // findDevice() matched the Ultra's USB ids and vendor collection, so this
++    // IS an Ultra. Whether it answers a read is a separate question: the mouse
++    // sleeps when idle and stops serving config requests while the dongle keeps
++    // answering. Never fall back to the X11 UI on a failed read -- that would
++    // silently hide 2K/4K/8K on a device that supports them.
++    m_isUltra = true;
++    m_currentDevicePath = m_ultraPath;
++    setWindowTitle(QStringLiteral("Attack Shark X11 Ultra"));
++
++    // The Ultra reaches 2000/4000/8000 Hz, which the X11 protocol cannot encode,
++    // so the fixed four-entry list is replaced with the full set. The Hz value
++    // is kept in item data rather than implied by the index.
++    ui->cbox_pollingrate->clear();
++    for (int i = 0; i < ultra::kRateCount; ++i) {
++        ui->cbox_pollingrate->addItem(
++            QStringLiteral("%1HZ").arg(ultra::kRates[i].hz), ultra::kRates[i].hz);
++    }
++
++    // LED/colour offsets for this device are not decoded yet; leave the control
++    // visible but inert rather than writing bytes we have not verified.
++    ui->cbox_colormodes->setEnabled(false);
++    ui->cbox_colormodes->setToolTip(
++        QStringLiteral("LED control is not yet supported on the X11 Ultra."));
++
++    if (!refreshUltraUi()) {
++        // Asleep. Poll until it wakes rather than making the user restart.
++        if (!m_ultraWake) {
++            m_ultraWake = new QTimer(this);
++            m_ultraWake->setInterval(2000);
++            connect(m_ultraWake, &QTimer::timeout, this, [this]() {
++                if (refreshUltraUi())
++                    m_ultraWake->stop();
++            });
++        }
++        m_ultraWake->start();
++    }
++    return true;
++}
++
++bool atsx11::refreshUltraUi()
++{
++    const ultra::Settings s = ultra::readSettings(m_ultraPath);
++    if (!s.valid) {
++        // Don't let Apply write a rate we never confirmed -- the combo would be
++        // showing a default rather than what the mouse actually holds.
++        ui->btn_apply->setEnabled(false);
++        ui->lbl_debug->setText(QStringLiteral(
++            "<html><head/><body><p><span style='color:orange;'>X11 Ultra detected, "
++            "but it is asleep. <b>Move the mouse</b> to wake it, "
++            "this will update itself.</span></p></body></html>"));
++        return false;
++    }
++
++    const int idx = ui->cbox_pollingrate->findData(s.reportRateHz);
++    if (idx >= 0)
++        ui->cbox_pollingrate->setCurrentIndex(idx);
++    ui->chbox_anglesnap->setChecked(s.angleSnap);
++    ui->chbox_rippleCTRL->setChecked(s.ripple);
++    ui->btn_apply->setEnabled(true);
++    updateInfoLabels();
++
++    const ultra::Battery bat = ultra::readBattery(m_ultraPath);
++    if (bat.valid) {
++        ui->lbl_batteryinfo->setEnabled(true);
++        ui->pbar_batteryinfo->setEnabled(true);
++        ui->pbar_batteryinfo->setValue(bat.percent);
++        ui->lbl_isCharging->setEnabled(true);
++        ui->lbl_isCharging->setPixmap(bat.charging
++            ? QPixmap(QStringLiteral(":/images/assets/lightning.png")) : QPixmap());
++    }
++
++    ui->lbl_debug->setText(QStringLiteral(
++        "<html><head/><body><p><span style='color:green;'>X11 Ultra on %1, "
++        "%2 Hz, %3 DPI stages%4</span></p></body></html>")
++        .arg(m_ultraPath).arg(s.reportRateHz).arg(s.maxDpiStage)
++        .arg(bat.valid ? QStringLiteral(", battery %1%").arg(bat.percent) : QString()));
++    return true;
++}
++
++void atsx11::applyUltra()
++{
++    const int hz = ui->cbox_pollingrate->currentData().toInt();
++    // The slider is the X11's 4..50 key-response range; the Ultra stores a
++    // plain debounce in ms, so clamp rather than pass it through blindly.
++    const int debounce = qBound(0, ui->sld_keyresptime->value(), 30);
++
++    const ultra::Settings before = ultra::readSettings(m_ultraPath);
++    if (!before.valid) {
++        ui->lbl_debug->setText(QStringLiteral(
++            "<html><head/><body><p><span style='color:orange;'>The mouse is asleep. "
++            "Move it and try again.</span></p></body></html>"));
++        return;
++    }
++    const bool ok = ultra::applySettings(m_ultraPath, hz,
++                                         ui->chbox_anglesnap->isChecked(),
++                                         ui->chbox_rippleCTRL->isChecked(),
++                                         before.motionSync,   // untouched by this UI
++                                         debounce,
++                                         before.lod);         // untouched by this UI
++    if (!ok) {
++        ui->lbl_debug->setText(QStringLiteral("<html><head/><body><p><span style='color:red;'>Error: failed to apply settings</span></p></body></html>"));
++        QMessageBox::warning(this, QStringLiteral("Error"),
++                             QStringLiteral("Failed to apply settings to the X11 Ultra."));
++        return;
++    }
++
++    // Read back so the UI shows what the device actually holds, not what we asked for.
++    const ultra::Settings after = ultra::readSettings(m_ultraPath);
++    saveSettings();
++    updateInfoLabels();
++    ui->lbl_debug->setText(QStringLiteral(
++        "<html><head/><body><p><span style='color:green;'>Applied, device reports %1 Hz</span></p></body></html>")
++        .arg(after.reportRateHz));
++}
++
+ void atsx11::loadDeviceAndBattery(const QString &devicePath)
+ {
+     m_currentDevicePath = devicePath;
+@@ -137,6 +263,11 @@ void atsx11::on_btn_apply_clicked()
+         return;
+     }
+ 
++    if (m_isUltra) {
++        applyUltra();
++        return;
++    }
++
+     const int color        = ui->cbox_colormodes->currentIndex();
+     const int prate        = ui->cbox_pollingrate->currentIndex();
+     const bool angleSnap   = ui->chbox_anglesnap->isChecked();
+diff --git a/atsx11.h b/atsx11.h
+index 6bb99a6..ce12734 100644
+--- a/atsx11.h
++++ b/atsx11.h
+@@ -4,6 +4,8 @@
+ #include <QMainWindow>
+ #include <QFutureWatcher>
+ 
++class QTimer;
++
+ class QCloseEvent;
+ class settings;
+ 
+@@ -36,12 +38,23 @@ private slots:
+ 
+ private:
+     void loadDeviceAndBattery(const QString &devicePath);
++    // Returns true if an X11 Ultra was found and the UI was switched to it.
++    bool detectUltra();
++    // Populates the UI from a device read. Returns false if the mouse did not
++    // answer (it sleeps when idle and stops serving config requests).
++    bool refreshUltraUi();
++    void applyUltra();
+     void loadSettings();
+     void saveSettings();
+     void updateInfoLabels();
+ 
+     Ui::atsx11 *ui;
+     QString m_currentDevicePath;
++    // The Ultra is a different device on a different protocol; when present we
++    // drive it through ultra:: instead of the libusb X11 path.
++    bool m_isUltra = false;
++    QString m_ultraPath;
++    QTimer *m_ultraWake = nullptr;
+     QFutureWatcher<int> *m_batteryWatcher = nullptr;
+     settings *m_settings = nullptr;
+ };
+diff --git a/main.cpp b/main.cpp
+index 42cce4f..2175bd7 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -1,4 +1,5 @@
+ #include "atsx11.h"
++#include "ultra.h"
+ 
+ #include <unistd.h>
+ #include <pwd.h>
+@@ -165,6 +166,16 @@ bool requestElevatedRestart()
+     return false;
+ }
+ 
++// True when an X11 Ultra is present and its config node is already usable
++// without elevation.
++bool ultraIsAccessible()
++{
++    const QString path = ultra::findDevice();
++    if (path.isEmpty())
++        return false;
++    return ::access(path.toUtf8().constData(), R_OK | W_OK) == 0;
++}
++
+ } // namespace
+ 
+ int main(int argc, char *argv[])
+@@ -174,7 +185,10 @@ int main(int argc, char *argv[])
+     QApplication a(argc, argv);
+     applyDarkTheme(a);
+ 
+-    if (geteuid() != 0) {
++    // Root is only needed for the libusb path used by the plain X11. The Ultra
++    // is driven over hidraw, which a uaccess udev rule already grants to the
++    // logged-in user, so don't demand privileges we have no use for.
++    if (geteuid() != 0 && !ultraIsAccessible()) {
+         if (requestElevatedRestart())
+             return 0;
+         return 1;
