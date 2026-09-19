@@ -1,0 +1,11 @@
+# Attack Shark X11 Ultra. Gives the logged in user access to the config
+# interface so the tools do not need root.
+#
+# f517 = 2.4 GHz dongle, f515 = USB cable. Same mouse either way.
+#
+# Install:
+#   sudo cp 70-attack-shark-x11-ultra.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f517", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f515", MODE="0660", TAG+="uaccess"
