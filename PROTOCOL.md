@@ -179,6 +179,43 @@ own page shows for the same gears:
 | 5 | `00 ff ff 57` | cyan |
 | 6 | `ff 00 ff 57` | magenta |
 
+## Gear LED effect (verified)
+
+Four `[v, 85-v]` pairs in one 8 byte block at `DPIEffectMode` (76), so a single
+read of 8 bytes gets the lot, matching the vendor's `en(DPIEffectMode, 8)`.
+
+| Offset | Field |
+|---:|---|
+| 76 | mode |
+| 78 | brightness (encoded, see below) |
+| 80 | speed, stored raw |
+| 82 | state, 1 on / 0 off |
+
+**"Off" is not a mode.** It is the state byte. The vendor's `Bb()` writes only
+`DPIEffectState = 0` and leaves the mode byte alone, which is why a mouse with
+its light off still reports a mode. Selecting a mode (`$b()`) writes the mode
+*and* forces state to 1.
+
+| Mode | Meaning | Uses |
+|---:|---|---|
+| 1 | Always On | brightness |
+| 2 | Breathing | speed |
+
+The mode numbering is not guesswork: the bundle's `dpiLight` component disables
+the brightness slider when the mode is 2 and the speed slider when it is 1, and
+a breathing effect is exactly the one that drives its own brightness.
+
+Brightness is a **lookup table, not a scale** (vendor `F6()`, inverse `N6()`).
+Slider range is 1..10, speed 1..5.
+
+| Level | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Stored | 16 | 30 | 60 | 90 | 128 | 150 | 180 | 210 | 230 | 255 |
+
+Verified on hardware 2026-09-20: Breathing at speed 3 and Always On at
+brightness 7 both wrote and read back exactly, and restoring returned the unit
+to its original mode 2 / state 0 / brightness 16 / speed 5.
+
 ## Key remap table (partially decoded)
 
 4 bytes per key at `KeyFunction` (96), `[type, mask, 00, checksum]`, checksum
@@ -289,6 +326,9 @@ motion sync, LOD, debounce, battery, DPI codec.
 
 ## Open items
 
+- Sleep time, sensor performance mode, long distance mode and angle tuning are
+  still undecoded. The offsets read back fine, there is just one observed value
+  for each.
 - **`DeviceOnLine` (cmd 3) reports `online=0` on a demonstrably live mouse**
   (34k motion events in 20 s). Do not gate anything on it. It is probably a
   dongle-link field with different semantics than the name implies; the

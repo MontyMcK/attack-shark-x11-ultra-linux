@@ -76,6 +76,9 @@ handshake OK  cid=124 mid=11 type=5 (wireless 8k)
 - angle snapping (the vendor calls it straight line correction), ripple
   control, motion sync, lift off distance, debounce
 - per gear LED colours, read and write, verified against the vendor's own swatches
+- gear LED effect: off, always on, breathing, with brightness and speed. note
+  that "off" is a separate state byte rather than a mode, so switching the light
+  off keeps whichever effect you had
 - battery level and charging state
 - raw config flash read and write if you want to poke at it yourself
 - dpi, read and write, 50 up to 60000. the codec round trips all 900 valid
@@ -86,10 +89,6 @@ handshake OK  cid=124 mid=11 type=5 (wireless 8k)
 
 ## what doesn't
 
-- lighting effects. the per gear colours are done, read and write, they are
-  plain RGB with a checksum at `DPIColor`. but the effect modes at `Light` and
-  the `DPIEffect*` offsets are not decoded, so i left them alone rather than
-  write bytes i do not understand into flash
 - sleep time, sensor performance mode (LP / HP / Corded), long distance mode and
   mouse angle tuning. the offsets are known and they read back fine, i just have
   one observed value each, which pins nothing
@@ -136,6 +135,10 @@ showing its own LED colour and value, with the gear the mouse is currently using
 outlined. click a chip to edit it, click its colour swatch to change that gear's
 LED. polling rate and lift off distance are button rows. motion sync, straight
 line correction and ripple correction are toggles.
+
+**lighting** has the gear LED effect: off, always on or breathing, with the
+brightness and speed sliders greyed to match whichever one the chosen effect
+actually uses, the same way the vendor page does it.
 
 **buttons** draws the mouse with callout labels. read only for now, see below.
 

@@ -38,6 +38,10 @@ enum Offset : uint16_t {
     OffLOD          = 10,
     OffDPIValue     = 12,
     OffDPIColor     = 44,
+    OffDPIEffectMode       = 76,
+    OffDPIEffectBrightness = 78,
+    OffDPIEffectSpeed      = 80,
+    OffDPIEffectState      = 82,
     OffDebounceTime = 169,
     OffMotionSync   = 171,
     OffSleepTime    = 173,
@@ -86,6 +90,19 @@ constexpr int kLodCount = sizeof(kLods) / sizeof(kLods[0]);
 bool colorToRecord(uint32_t rgb, uint8_t out[4]);
 uint32_t recordToColor(const uint8_t rec[4]);   // 0xFFFFFFFF if the check fails
 
+// Gear LED effect. "Off" is not a mode, it is the separate state byte at
+// OffDPIEffectState, which is why the mode byte keeps whatever was last chosen
+// while the light is off. Taken from the vendor bundle's dpiLight component:
+// it disables the brightness slider for mode 2 and the speed slider for mode 1,
+// which is what identifies which is which.
+enum LightMode { LightOff = 0, LightAlwaysOn = 1, LightBreathing = 2 };
+constexpr int kBrightnessMin = 1, kBrightnessMax = 10;   // Always On only
+constexpr int kLightSpeedMin = 1, kLightSpeedMax = 5;    // Breathing only
+
+// Brightness is a lookup, not a scale: the vendor's F6()/N6() pair.
+uint8_t brightnessToRaw(int level);   // 1..10 -> stored byte
+int     brightnessFromRaw(uint8_t raw);
+
 // Path of the hidraw node carrying the vendor collection, or empty.
 QString findDevice();
 
@@ -103,6 +120,9 @@ struct Settings {
     QList<int> dpiStages;   // decoded DPI per stage, 0 where the read failed
     QList<uint32_t> dpiColors;  // 0xRRGGBB per stage, 0xFFFFFFFF where unread
     bool fps20k = false;
+    int lightMode  = LightOff;   // 0 when the effect is switched off
+    int brightness = 0;          // 1..10
+    int lightSpeed = 0;          // 1..5
     // Handshake device type. 3 is wired 8k, 5 is wireless 8k. See the table in
     // PROTOCOL.md; it is how the mouse reports its own connection.
     int deviceType = -1;
@@ -131,6 +151,9 @@ struct Writable {
     int ripple       = -1;
     int motionSync   = -1;
     int fps20k       = -1;
+    int lightMode    = -1;  // -1 leave, else a LightMode
+    int brightness   = -1;  // -1 leave, else 1..10
+    int lightSpeed   = -1;  // -1 leave, else 1..5
 };
 
 // Each returns true on success. Writing is immediate; there is no commit step.

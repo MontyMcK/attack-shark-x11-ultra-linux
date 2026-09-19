@@ -15,6 +15,7 @@ class ToggleRow;
 class QLabel;
 class QProgressBar;
 class QPushButton;
+class QSlider;
 class QSpinBox;
 class QStackedWidget;
 class QTimer;
@@ -70,6 +71,12 @@ private:
     ToggleRow *m_angle = nullptr;
     ToggleRow *m_fps20k = nullptr;
     Segmented *m_debounce = nullptr;
+    Segmented *m_lightMode = nullptr;
+    QSlider *m_brightness = nullptr;
+    QSlider *m_lightSpeed = nullptr;
+    QLabel *m_brightnessVal = nullptr;
+    QLabel *m_lightSpeedVal = nullptr;
+    void syncLightEnables();
     MouseDiagram *m_diagram = nullptr;
 };
 

@@ -269,6 +269,34 @@ uint32_t recordToColor(const uint8_t rec[4])
          |  static_cast<uint32_t>(rec[2]);
 }
 
+// Vendor F6(). Deliberately not a formula: the table has gaps at 5 and 9.
+uint8_t brightnessToRaw(int level)
+{
+    switch (level) {
+    case 1:  return 16;
+    case 5:  return 128;
+    case 9:  return 230;
+    case 10: return 255;
+    case 2: case 3: case 4: case 6: case 7: case 8:
+        return static_cast<uint8_t>(30 * (level - 1));
+    default: return 128;
+    }
+}
+
+// Vendor N6(), the exact inverse for every value brightnessToRaw emits.
+int brightnessFromRaw(uint8_t raw)
+{
+    if (raw % 30 == 0)
+        return raw / 30 + 1;
+    switch (raw) {
+    case 16:  return 1;
+    case 128: return 5;
+    case 230: return 9;
+    case 255: return 10;
+    default:  return 5;
+    }
+}
+
 QString findDevice()
 {
     struct udev *udev = udev_new();
@@ -370,6 +398,17 @@ Settings readSettings(const QString &hidrawPath)
         readByte(OffSensorFPS20K, fps);
         s.fps20k = fps != 0;
 
+        // One 8 byte read covers mode, brightness, speed and state, each as a
+        // [v, 85-v] pair, matching the vendor's en(DPIEffectMode, 8).
+        uint8_t fx[8] = {0};
+        if (readFlash(fd, OffDPIEffectMode, 8, fx)) {
+            s.lightMode  = (fx[6] != 0) ? fx[0] : LightOff;
+            s.brightness = brightnessFromRaw(fx[2]);
+            s.lightSpeed = qBound(kLightSpeedMin, int(fx[4]), kLightSpeedMax);
+        } else {
+            allOk = false;
+        }
+
         s.reportRateHz = codeToRate(static_cast<uint8_t>(rateCode));
         s.motionSync = motion != 0;
         s.angleSnap  = angle != 0;
@@ -412,6 +451,14 @@ bool applyWritable(const QString &hidrawPath, const Writable &w)
     }
     if (w.lod > 2 || w.debounceMs > 30)
         return false;
+    if (w.lightMode > LightBreathing)
+        return false;
+    if (w.brightness > kBrightnessMax
+        || (w.brightness >= 0 && w.brightness < kBrightnessMin))
+        return false;
+    if (w.lightSpeed > kLightSpeedMax
+        || (w.lightSpeed >= 0 && w.lightSpeed < kLightSpeedMin))
+        return false;
 
     const int fd = openDevice(hidrawPath);
     if (fd < 0)
@@ -432,6 +479,22 @@ bool applyWritable(const QString &hidrawPath, const Writable &w)
         ok &= writeValue(fd, OffMotionSync, w.motionSync ? 1 : 0);
     if (w.fps20k >= 0)
         ok &= writeValue(fd, OffSensorFPS20K, w.fps20k ? 1 : 0);
+
+    // Brightness and speed first, so switching an effect on already has the
+    // values it is meant to run at.
+    if (w.brightness >= 0)
+        ok &= writeValue(fd, OffDPIEffectBrightness, brightnessToRaw(w.brightness));
+    if (w.lightSpeed >= 0)
+        ok &= writeValue(fd, OffDPIEffectSpeed, static_cast<uint8_t>(w.lightSpeed));
+
+    if (w.lightMode == LightOff) {
+        // Off leaves the mode byte alone, exactly as the vendor's Bb() does,
+        // so the last effect is still there when it is switched back on.
+        ok &= writeValue(fd, OffDPIEffectState, 0);
+    } else if (w.lightMode > 0) {
+        ok &= writeValue(fd, OffDPIEffectMode, static_cast<uint8_t>(w.lightMode));
+        ok &= writeValue(fd, OffDPIEffectState, 1);
+    }
 
     ::close(fd);
     return ok;

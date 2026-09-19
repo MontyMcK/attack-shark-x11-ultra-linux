@@ -13,6 +13,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QTimer>
@@ -310,11 +311,59 @@ QWidget *MainWindow::buildLightingPage()
                        "Sensor page by clicking a gear's swatch."));
     col->addWidget(c);
 
-    auto *fx = new Card(QStringLiteral("Lighting effect"));
-    fx->setUnavailable(QStringLiteral(
-        "Not decoded yet. The effect mode, brightness and speed offsets are "
-        "known but their value encodings are not, and writing a guess into "
-        "flash is not worth it. Everything else on this page is live."));
+    auto *fx = new Card(QStringLiteral("Gear LED effect"),
+        QStringLiteral("Off keeps whichever effect you had, it just switches "
+                       "the light off. Brightness applies to Always On, speed "
+                       "applies to Breathing."));
+    m_lightMode = new Segmented(fx);
+    m_lightMode->addOption(QStringLiteral("Off"), ultra::LightOff);
+    m_lightMode->addOption(QStringLiteral("Always On"), ultra::LightAlwaysOn);
+    m_lightMode->addOption(QStringLiteral("Breathing"), ultra::LightBreathing);
+    connect(m_lightMode, &Segmented::changed, this, [this](const QVariant &) {
+        syncLightEnables();
+        markDirty();
+    });
+    fx->body()->addWidget(m_lightMode);
+
+    auto *sliders = new QWidget(fx);
+    auto *grid = new QVBoxLayout(sliders);
+    grid->setContentsMargins(0, 6, 0, 0);
+    grid->setSpacing(14);
+
+    struct Row { const char *name; QSlider **slider; QLabel **value; int lo, hi; };
+    const Row rows[] = {
+        { "Brightness", &m_brightness, &m_brightnessVal,
+          ultra::kBrightnessMin, ultra::kBrightnessMax },
+        { "Speed",      &m_lightSpeed, &m_lightSpeedVal,
+          ultra::kLightSpeedMin, ultra::kLightSpeedMax },
+    };
+    for (const Row &r : rows) {
+        auto *line = new QHBoxLayout;
+        line->setSpacing(14);
+        auto *nameLbl = new QLabel(QString::fromLatin1(r.name), sliders);
+        nameLbl->setFixedWidth(80);
+        line->addWidget(nameLbl);
+
+        auto *sl = new QSlider(Qt::Horizontal, sliders);
+        sl->setRange(r.lo, r.hi);
+        sl->setPageStep(1);
+        sl->setFixedWidth(260);
+        line->addWidget(sl);
+
+        auto *val = new QLabel(QString::number(r.lo), sliders);
+        val->setFixedWidth(28);
+        line->addWidget(val);
+        line->addStretch();
+        grid->addLayout(line);
+
+        *r.slider = sl;
+        *r.value = val;
+        connect(sl, &QSlider::valueChanged, this, [this, val](int v) {
+            val->setText(QString::number(v));
+            markDirty();
+        });
+    }
+    fx->body()->addWidget(sliders);
     col->addWidget(fx);
 
     col->addStretch();
@@ -383,6 +432,17 @@ QWidget *MainWindow::buildAdvancedPage()
 }
 
 // --------------------------------------------------------------- data ----
+
+void MainWindow::syncLightEnables()
+{
+    const int mode = m_lightMode->currentValue().toInt();
+    // The vendor greys these the same way: a static light has no speed, and a
+    // breathing one drives its own brightness.
+    m_brightness->setEnabled(mode == ultra::LightAlwaysOn);
+    m_brightnessVal->setEnabled(mode == ultra::LightAlwaysOn);
+    m_lightSpeed->setEnabled(mode == ultra::LightBreathing);
+    m_lightSpeedVal->setEnabled(mode == ultra::LightBreathing);
+}
 
 void MainWindow::setStatus(const QString &html)
 {
@@ -454,6 +514,18 @@ bool MainWindow::refresh()
     m_ripple->setChecked(s.ripple);
     m_fps20k->setChecked(s.fps20k);
 
+    m_lightMode->setCurrentValue(s.lightMode);
+    {
+        QSignalBlocker b1(m_brightness), b2(m_lightSpeed);
+        m_brightness->setValue(qBound(ultra::kBrightnessMin, s.brightness,
+                                      ultra::kBrightnessMax));
+        m_lightSpeed->setValue(qBound(ultra::kLightSpeedMin, s.lightSpeed,
+                                      ultra::kLightSpeedMax));
+        m_brightnessVal->setText(QString::number(m_brightness->value()));
+        m_lightSpeedVal->setText(QString::number(m_lightSpeed->value()));
+    }
+    syncLightEnables();
+
     if (m_activeStage < m_colors.size())
         m_diagram->setLedColor(m_colors.at(m_activeStage));
 
@@ -487,6 +559,17 @@ void MainWindow::apply()
     w.ripple       = m_ripple->isChecked() ? 1 : 0;
     w.motionSync   = m_motion->isChecked() ? 1 : 0;
     w.fps20k       = m_fps20k->isChecked() ? 1 : 0;
+
+    const QVariant modeVal = m_lightMode->currentValue();
+    if (modeVal.isValid()) {
+        w.lightMode = modeVal.toInt();
+        // Only send the value the chosen effect actually uses, so switching to
+        // Breathing cannot quietly rewrite the Always On brightness.
+        if (w.lightMode == ultra::LightAlwaysOn)
+            w.brightness = m_brightness->value();
+        else if (w.lightMode == ultra::LightBreathing)
+            w.lightSpeed = m_lightSpeed->value();
+    }
 
     if (!ultra::applyWritable(m_path, w)) {
         setStatus(QStringLiteral("<span style='color:%1'>Write failed. Move the "
