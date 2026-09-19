@@ -118,15 +118,31 @@ bytes. read them both and you get a free sanity check.
 
 ## the gui
 
+needs qt6 widgets, libudev, cmake, imagemagick and a compiler. no root.
+
 ```sh
+./packaging/make-icons.sh packaging/logo.png     # only if you change the logo
 cd app
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local
 cmake --build build -j$(nproc)
-./build/attackshark-ultra
+cmake --install build
 ```
 
-needs qt6 widgets, libudev, cmake and a compiler. no root, the udev rule covers
-it.
+that puts the binary in `~/.local/bin`, the icon in the hicolor theme and a
+desktop entry in `~/.local/share/applications`, so it turns up in your launcher.
+the entry gets the full binary path baked into `Exec`, because `~/.local/bin` is
+not on the session PATH on most setups and a launcher entry that silently does
+nothing is miserable to debug.
+
+use `-DCMAKE_INSTALL_PREFIX=/usr/local` with sudo if you want it for every user.
+that prefix also installs the udev rule for you.
+
+to just run it without installing:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+./build/attackshark-ultra
+```
 
 four pages down the left: sensor, lighting, buttons, advanced.
 

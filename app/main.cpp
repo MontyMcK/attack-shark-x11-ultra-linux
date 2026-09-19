@@ -2,6 +2,7 @@
 #include "theme.h"
 
 #include <QApplication>
+#include <QIcon>
 #include <QPalette>
 
 int main(int argc, char *argv[])
@@ -10,6 +11,17 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("attackshark-ultra"));
     app.setApplicationDisplayName(QStringLiteral("Attack Shark X11 Ultra"));
     app.setOrganizationName(QStringLiteral("attackshark-ultra"));
+    app.setDesktopFileName(QStringLiteral("attackshark-ultra"));
+
+    // Prefer the installed theme icon so a user themed copy wins, and fall back
+    // to the one compiled into the binary when nothing is installed yet.
+    QIcon icon = QIcon::fromTheme(QStringLiteral("attackshark-ultra"));
+#ifdef HAVE_APPICON
+    if (icon.isNull())
+        icon = QIcon(QStringLiteral(":/appicon.png"));
+#endif
+    if (!icon.isNull())
+        app.setWindowIcon(icon);
 
     // Set the base palette as well as the sheet: dialogs we do not style by
     // hand (the colour picker) pick their colours up from here.
