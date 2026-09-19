@@ -36,6 +36,8 @@ enum Offset : uint16_t {
     OffMaxDpiStage  = 2,
     OffCurrentDPI   = 4,
     OffLOD          = 10,
+    OffDPIValue     = 12,
+    OffDPIColor     = 44,
     OffDebounceTime = 169,
     OffMotionSync   = 171,
     OffSleepTime    = 173,
@@ -55,6 +57,22 @@ constexpr int kRateCount = sizeof(kRates) / sizeof(kRates[0]);
 uint8_t rateToCode(int hz);   // 0 if unsupported
 int     codeToRate(uint8_t);  // 0 if unrecognised
 
+// DPI. One 4-byte record per stage at OffDPIValue + stage*kDpiRecordLen, stage
+// count at OffMaxDpiStage. Above kDpiMaxSimple the sensor switches range: the
+// value is stored halved and flagged with DPIex, so the usable step doubles.
+constexpr int kDpiStep      = 50;
+constexpr int kDpiMaxSimple = 30000;
+constexpr int kDpiMax       = 60000;
+constexpr int kDpiRecordLen = 4;
+constexpr int kDpiMaxStages = 8;
+
+// False if dpi is out of range or off the step boundary for its range.
+bool dpiToRecord(int dpi, uint8_t out[kDpiRecordLen]);
+// 0 if the record's checksum does not hold.
+int  recordToDpi(const uint8_t rec[kDpiRecordLen]);
+// Nearest DPI the device can actually store.
+int  snapDpi(int dpi);
+
 // Path of the hidraw node carrying the vendor collection, or empty.
 QString findDevice();
 
@@ -69,6 +87,7 @@ struct Settings {
     bool ripple = false;
     int  maxDpiStage = 0;
     int  currentDpiStage = 0;
+    QList<int> dpiStages;   // decoded DPI per stage, 0 where the read failed
 };
 
 Settings readSettings(const QString &hidrawPath);
@@ -85,6 +104,14 @@ Battery readBattery(const QString &hidrawPath);
 // Each returns true on success. Writing is immediate; there is no commit step.
 bool applySettings(const QString &hidrawPath, int reportRateHz, bool angleSnap,
                    bool rippleControl, bool motionSync, int debounceMs, int lod);
+
+struct DpiWrite { int stage; int dpi; };
+
+// Writes each stage then, if currentStage >= 0, makes that stage the active
+// one. Every value is validated before the device is opened so a bad entry
+// cannot leave half the stages rewritten.
+bool applyDpi(const QString &hidrawPath, const QList<DpiWrite> &writes,
+              int currentStage);
 
 } // namespace ultra
 

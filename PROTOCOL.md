@@ -202,7 +202,7 @@ out of them is below:
 
 Without these the DPI encoding cannot be derived, the step is not in the JS.
 
-## DPI (verified: decodes this unit's flash with valid checksums)
+## DPI (verified on hardware, both directions)
 
 4 bytes per stage at `DPIValue + stage*4` (sensor `3955` instead uses 6 bytes
 at `Sensor3955DPI`; not applicable here). Stage count is at `maxDpiStage`.
@@ -220,7 +220,18 @@ r[3]  = 85 - (r[0]+r[1]+r[2])                  # same checksum as elsewhere
 >30000 range, where the value is stored halved (`val = (dpi/2)/50 - 1`).
 
 Round-trips cleanly across all 900 valid values (600 low + 300 high). Encoding
-42000 reproduces the device's own bytes exactly: `a3 a3 55 ba`.
+each of this unit's six stages reproduces the device's own bytes exactly, 42000
+included: `a3 a3 55 ba`.
+
+**Writes verified 2026-09-20.** Stage 0 written 800 -> 850 landed as
+`10 10 00 35`, exactly what the encoder produces, and read back as 850. Writing
+800 again restored `0f 0f 00 37` byte for byte. Use the 4-byte bulk write
+(vendor `gt()`, cmd 7 with `[4]=4`), not the 2-byte `[v, 85-v]` pair writer:
+a DPI record is a single 4-byte value with its own checksum at `r[3]`, not a
+redundancy pair.
+
+Validate before writing. A DPI that is not on its range's step boundary has no
+valid encoding, and a half-written stage table is worse than no write at all.
 
 ### This unit's stages, read live
 
@@ -252,10 +263,6 @@ motion sync, LOD, debounce, battery, DPI codec.
 
 ## Open items
 
-- **DPI value encoding undecoded.** Offset 12 reads
-  `0f 0f 00 37 1f 1f 00 17 3f 3f`, looks like 4 bytes per stage, but no
-  tested formula reproduces the manual's 1200/2400/3200/5600/8000/42000.
-  Read the full 44-byte block (offset 12 -> 44) before guessing.
 - **`DeviceOnLine` (cmd 3) reports `online=0` on a demonstrably live mouse**
   (34k motion events in 20 s). Do not gate anything on it. It is probably a
   dongle-link field with different semantics than the name implies; the

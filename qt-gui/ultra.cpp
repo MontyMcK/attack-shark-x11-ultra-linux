@@ -129,12 +129,20 @@ bool readFlash(int fd, int addr, int len, uint8_t *out)
     return true;
 }
 
+// Vendor gt(): bulk write, 10 bytes max per packet.
+bool writeBytes(int fd, int addr, const uint8_t *data, int len)
+{
+    if (len < 1 || len > 10)
+        return false;
+    uint8_t pkt[kPacketLen];
+    buildPacket(pkt, CmdWriteFlash, data, len, addr, len);
+    return transfer(fd, pkt, nullptr);
+}
+
 bool writeValue(int fd, int addr, uint8_t value)
 {
     const uint8_t payload[2] = { value, pairByte(value) };
-    uint8_t pkt[kPacketLen];
-    buildPacket(pkt, CmdWriteFlash, payload, 2, addr, 2);
-    return transfer(fd, pkt, nullptr);
+    return writeBytes(fd, addr, payload, 2);
 }
 
 // Open the node and get a session going.
@@ -188,6 +196,55 @@ int codeToRate(uint8_t code)
     for (const auto &r : kRates)
         if (r.code == code) return r.hz;
     return 0;
+}
+
+bool dpiToRecord(int dpi, uint8_t out[kDpiRecordLen])
+{
+    if (dpi < kDpiStep || dpi > kDpiMax)
+        return false;
+
+    int val, ex;
+    if (dpi <= kDpiMaxSimple) {
+        if (dpi % kDpiStep)
+            return false;
+        val = dpi / kDpiStep - 1;
+        ex  = 0;
+    } else {
+        // Second sensor range: stored halved, flagged with DPIex.
+        if (dpi % (kDpiStep * 2))
+            return false;
+        val = (dpi / 2) / kDpiStep - 1;
+        ex  = 17;
+    }
+
+    const int hi = val >> 8;
+    out[0] = static_cast<uint8_t>(val & 0xFF);          // X low
+    out[1] = static_cast<uint8_t>(val & 0xFF);          // Y low, equal unless split
+    // Value high bits sit at 2-3 and 6-7, DPIex at bits 0 and 4.
+    out[2] = static_cast<uint8_t>(((hi << 2) | (hi << 6) | ex | (ex << 4)) & 0xFF);
+    out[3] = static_cast<uint8_t>((85 - ((out[0] + out[1] + out[2]) & 0xFF)) & 0xFF);
+    return true;
+}
+
+int recordToDpi(const uint8_t rec[kDpiRecordLen])
+{
+    const uint8_t want =
+        static_cast<uint8_t>((85 - ((rec[0] + rec[1] + rec[2]) & 0xFF)) & 0xFF);
+    if (rec[3] != want)
+        return 0;
+    // Bit 0 of rec[2] is DPIex, i.e. the stored value is halved.
+    const bool doubled = (rec[2] & 0x01) != 0;
+    const int  hi      = (rec[2] >> 2) & 0x03;
+    const int  dpi     = (((hi << 8) | rec[0]) + 1) * kDpiStep;
+    return doubled ? dpi * 2 : dpi;
+}
+
+int snapDpi(int dpi)
+{
+    if (dpi < kDpiStep) return kDpiStep;
+    if (dpi > kDpiMax)  return kDpiMax;
+    const int step = (dpi > kDpiMaxSimple) ? kDpiStep * 2 : kDpiStep;
+    return ((dpi + step / 2) / step) * step;
 }
 
 QString findDevice()
@@ -257,6 +314,15 @@ Settings readSettings(const QString &hidrawPath)
         readByte(OffMaxDpiStage, s.maxDpiStage);
         readByte(OffCurrentDPI, s.currentDpiStage);
 
+        s.dpiStages.clear();
+        const int stages = qBound(0, s.maxDpiStage, kDpiMaxStages);
+        for (int st = 0; st < stages; ++st) {
+            uint8_t rec[kDpiRecordLen] = {0};
+            const bool got = readFlash(fd, OffDPIValue + st * kDpiRecordLen,
+                                       kDpiRecordLen, rec);
+            s.dpiStages.append(got ? recordToDpi(rec) : 0);
+        }
+
         s.reportRateHz = codeToRate(static_cast<uint8_t>(rateCode));
         s.motionSync = motion != 0;
         s.angleSnap  = angle != 0;
@@ -308,6 +374,39 @@ bool applySettings(const QString &hidrawPath, int reportRateHz, bool angleSnap,
     ok &= writeValue(fd, OffMotionSync, motionSync ? 1 : 0);
     ok &= writeValue(fd, OffDebounceTime, static_cast<uint8_t>(debounceMs));
     ok &= writeValue(fd, OffLOD, static_cast<uint8_t>(lod));
+
+    ::close(fd);
+    return ok;
+}
+
+bool applyDpi(const QString &hidrawPath, const QList<DpiWrite> &writes,
+              int currentStage)
+{
+    if (writes.isEmpty() && currentStage < 0)
+        return true;
+    if (currentStage >= kDpiMaxStages)
+        return false;
+
+    // Validate up front: a half-written stage table is worse than no write.
+    for (const DpiWrite &w : writes) {
+        uint8_t rec[kDpiRecordLen];
+        if (w.stage < 0 || w.stage >= kDpiMaxStages || !dpiToRecord(w.dpi, rec))
+            return false;
+    }
+
+    const int fd = openDevice(hidrawPath);
+    if (fd < 0)
+        return false;
+
+    bool ok = true;
+    for (const DpiWrite &w : writes) {
+        uint8_t rec[kDpiRecordLen];
+        dpiToRecord(w.dpi, rec);
+        ok &= writeBytes(fd, OffDPIValue + w.stage * kDpiRecordLen, rec,
+                         kDpiRecordLen);
+    }
+    if (ok && currentStage >= 0)
+        ok &= writeValue(fd, OffCurrentDPI, static_cast<uint8_t>(currentStage));
 
     ::close(fd);
     return ok;
