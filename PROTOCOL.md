@@ -161,6 +161,32 @@ Writes land immediately, there is no separate commit/save command.
 
 Back up before writing: `read_block(0, 256)` captures the whole settings region.
 
+## DPI gear colours (verified)
+
+4 bytes per gear at `DPIColor + stage*4`, `[R, G, B, checksum]`, with the same
+checksum as a DPI record (`85 - (R+G+B)`). Note this is **not** the `[v, 85-v]`
+pair layout used by single byte settings.
+
+Read live off this unit, and they line up exactly with the swatches the vendor's
+own page shows for the same gears:
+
+| Gear | Bytes | Colour |
+|---:|---|---|
+| 1 | `ff 00 00 56` | red |
+| 2 | `00 ff 00 56` | green |
+| 3 | `00 00 ff 56` | blue |
+| 4 | `ff ff 00 57` | yellow |
+| 5 | `00 ff ff 57` | cyan |
+| 6 | `ff 00 ff 57` | magenta |
+
+## Key remap table (partially decoded)
+
+4 bytes per key at `KeyFunction` (96), `[type, mask, 00, checksum]`, checksum
+again `85 - sum`. This unit reads `01 01 00 53`, `01 02 00 52`, `01 04 00 50`,
+`01 08 00 4c`: type 1 is "mouse button" and the mask is the button bit, so 1, 2,
+4, 8 are left, right, middle, back. The other types (keyboard, macro,
+multimedia, shortcut) are not mapped yet.
+
 ## Value storage: redundancy pairs
 
 Single-byte settings are stored as `[value, 85-value]`, matching the vendor's
