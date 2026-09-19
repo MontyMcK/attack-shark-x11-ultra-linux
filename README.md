@@ -54,7 +54,7 @@ match both, or skip the product id entirely and match on the vendor usage page
 | `x11ultra.py` | python transport. handshake, flash read/write, report rate, dpi codec |
 | `probe.py` | read only. dumps what your mouse currently holds, touches nothing |
 | `udev/` | rule so you do not need root |
-| `qt-gui/` | ultra support for the existing qt gui, see below |
+| `app/` | the gui. qt6, builds standalone, no upstream code in it |
 
 run the probe first:
 
@@ -73,7 +73,9 @@ handshake OK  cid=124 mid=11 type=5 (wireless 8k)
 ## what works
 
 - report rate, all seven values including 8000 Hz
-- angle snapping, ripple control, motion sync, lift off distance, debounce
+- angle snapping (the vendor calls it straight line correction), ripple
+  control, motion sync, lift off distance, debounce
+- per gear LED colours, read and write, verified against the vendor's own swatches
 - battery level and charging state
 - raw config flash read and write if you want to poke at it yourself
 - dpi, read and write, 50 up to 60000. the codec round trips all 900 valid
@@ -84,14 +86,15 @@ handshake OK  cid=124 mid=11 type=5 (wireless 8k)
 
 ## what doesn't
 
-- lighting effects. i can read the per stage dpi colours, they are plain RGB with
-  a checksum at `DPIColor`, and they match the manual's table. but the effect
-  modes at `Light` and the `DPIEffect*` offsets i have not decoded, so i left them
-  alone rather than write bytes i do not understand into flash
+- lighting effects. the per gear colours are done, read and write, they are
+  plain RGB with a checksum at `DPIColor`. but the effect modes at `Light` and
+  the `DPIEffect*` offsets are not decoded, so i left them alone rather than
+  write bytes i do not understand into flash
+- sleep time, sensor performance mode (LP / HP / Corded), long distance mode and
+  mouse angle tuning. the offsets are known and they read back fine, i just have
+  one observed value each, which pins nothing
 - macros and key remapping. the offsets are in the eeprom map, the payload format
   is not worked out
-- sleep and deep sleep timers. same story, `SleepTime` is in the map but i have
-  not decoded what it wants
 
 ## gotchas that will waste your time
 
@@ -114,39 +117,46 @@ flash reads time out. move the mouse and it comes back. do not treat that as
 **settings are stored twice.** single byte values live as `[v, 85-v]`. write both
 bytes. read them both and you get a free sanity check.
 
-## qt gui
-
-there is already a good gui for the plain x11 by
-[iago-fragnan](https://github.com/iago-fragnan/attack-shark-x11-linux). rather
-than write a second one i added an ultra path to it.
-
-`qt-gui/ultra.cpp` and `ultra.h` are self contained and mine. the patch is the
-glue that hooks them into his app.
+## the gui
 
 ```sh
-git clone https://github.com/iago-fragnan/attack-shark-x11-linux.git
-cd attack-shark-x11-linux
-cp /path/to/qt-gui/ultra.{h,cpp} .
-git apply /path/to/qt-gui/ultra-support.patch
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
-./build/attackshark-x11
+cd app
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+./build/attackshark-ultra
 ```
 
-it detects the ultra, swaps the polling rate list for the full seven entries,
-adds a DPI panel where you pick a stage, set its value and mark which stage the
-mouse is actually using, and puts the active DPI in the tile the LED readout was
-wasting. his x11 path is completely untouched when an ultra is not plugged in.
-it also skips the pkexec prompt on the ultra, which does not need root once the
-udev rule is in.
+needs qt6 widgets, libudev, cmake and a compiler. no root, the udev rule covers
+it.
 
-apply only rewrites the stages you actually changed, and every value is checked
-before the device is opened, so a bad entry cannot leave you with half a stage
-table written.
+four pages down the left: sensor, lighting, buttons, advanced.
 
-the colour dropdown and the sleep sliders are greyed out rather than left
-looking live. they are in the eeprom map but the payloads are not decoded, and a
-control that silently does nothing when you hit apply is worse than one that
-tells you it cannot.
+**sensor** is where you will live. the dpi gears are laid out as chips, each one
+showing its own LED colour and value, with the gear the mouse is currently using
+outlined. click a chip to edit it, click its colour swatch to change that gear's
+LED. polling rate and lift off distance are button rows. motion sync, straight
+line correction and ripple correction are toggles.
+
+**buttons** draws the mouse with callout labels. read only for now, see below.
+
+**advanced** has the de-shake delay and the 20K FPS toggle.
+
+apply only writes what changed. gears you did not touch are not rewritten,
+fields the ui does not expose are not written at all, and everything is
+validated before the device is even opened, so a bad value cannot leave you with
+half a stage table.
+
+anything that is not decoded is greyed out with the reason written on it rather
+than left looking live. a control that silently does nothing when you press
+apply is worse than one that admits it cannot.
+
+i did start by patching
+[iago-fragnan's x11 gui](https://github.com/iago-fragnan/attack-shark-x11-linux)
+rather than writing a second one, and that worked fine. i moved off it because
+his window is a fixed 720x320 with every widget placed at absolute pixel
+coordinates, which fights you the moment you add anything, and because his repo
+has no license so i would rather not be shipping his code around. his project is
+still the one to use if you have the plain x11.
 
 i have not sent this upstream yet.
 

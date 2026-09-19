@@ -100,17 +100,19 @@ bool transfer(int fd, const uint8_t pkt[kPacketLen], uint8_t reply[kPacketLen],
     return false;
 }
 
-bool handshake(int fd)
+bool handshake(int fd, int *deviceType = nullptr)
 {
     // 4 random bytes then 4 zeros; the reply carries cid/mid/type.
     uint8_t nonce[8] = {0};
     for (int i = 0; i < 4; ++i)
         nonce[i] = static_cast<uint8_t>(rand() & 0xFF);
 
-    uint8_t pkt[kPacketLen];
+    uint8_t pkt[kPacketLen], reply[kPacketLen];
     buildPacket(pkt, CmdEncrypt, nonce, 8);
-    if (!transfer(fd, pkt, nullptr))
+    if (!transfer(fd, pkt, reply))
         return false;
+    if (deviceType)
+        *deviceType = reply[11];
 
     const uint8_t on = 1;
     buildPacket(pkt, CmdPcDriver, &on, 1);
@@ -146,12 +148,12 @@ bool writeValue(int fd, int addr, uint8_t value)
 }
 
 // Open the node and get a session going.
-int openDevice(const QString &path)
+int openDevice(const QString &path, int *deviceType = nullptr)
 {
     const int fd = ::open(path.toUtf8().constData(), O_RDWR | O_NONBLOCK);
     if (fd < 0)
         return -1;
-    if (!handshake(fd)) {
+    if (!handshake(fd, deviceType)) {
         ::close(fd);
         return -1;
     }
@@ -247,6 +249,26 @@ int snapDpi(int dpi)
     return ((dpi + step / 2) / step) * step;
 }
 
+bool colorToRecord(uint32_t rgb, uint8_t out[4])
+{
+    out[0] = static_cast<uint8_t>((rgb >> 16) & 0xFF);
+    out[1] = static_cast<uint8_t>((rgb >> 8) & 0xFF);
+    out[2] = static_cast<uint8_t>(rgb & 0xFF);
+    out[3] = static_cast<uint8_t>((85 - ((out[0] + out[1] + out[2]) & 0xFF)) & 0xFF);
+    return true;
+}
+
+uint32_t recordToColor(const uint8_t rec[4])
+{
+    const uint8_t want =
+        static_cast<uint8_t>((85 - ((rec[0] + rec[1] + rec[2]) & 0xFF)) & 0xFF);
+    if (rec[3] != want)
+        return 0xFFFFFFFFu;
+    return (static_cast<uint32_t>(rec[0]) << 16)
+         | (static_cast<uint32_t>(rec[1]) << 8)
+         |  static_cast<uint32_t>(rec[2]);
+}
+
 QString findDevice()
 {
     struct udev *udev = udev_new();
@@ -296,13 +318,23 @@ Settings readSettings(const QString &hidrawPath)
     // whether the device is there. Reopen and retry the whole snapshot before
     // reporting failure -- the rate read in particular gates everything.
     for (int round = 0; round < 3 && !s.valid; ++round) {
-        const int fd = openDevice(hidrawPath);
+        int devType = -1;
+        const int fd = openDevice(hidrawPath, &devType);
         if (fd < 0)
             continue;
+        s.deviceType = devType;
 
         uint8_t buf[10];
+        // A missed read used to leave its field at 0, which looks exactly like
+        // a real zero. The UI would then show that zero and Apply would write
+        // it back, silently wiping the real setting. Track every read and throw
+        // the whole snapshot away if any of them missed.
+        bool allOk = true;
         auto readByte = [&](int addr, int &dest) {
-            if (readFlash(fd, addr, 2, buf)) dest = buf[0];
+            if (readFlash(fd, addr, 2, buf))
+                dest = buf[0];
+            else
+                allOk = false;
         };
         int rateCode = 0, motion = 0, angle = 0, ripple = 0;
         readByte(OffReportRate, rateCode);
@@ -315,19 +347,34 @@ Settings readSettings(const QString &hidrawPath)
         readByte(OffCurrentDPI, s.currentDpiStage);
 
         s.dpiStages.clear();
+        s.dpiColors.clear();
         const int stages = qBound(0, s.maxDpiStage, kDpiMaxStages);
         for (int st = 0; st < stages; ++st) {
             uint8_t rec[kDpiRecordLen] = {0};
             const bool got = readFlash(fd, OffDPIValue + st * kDpiRecordLen,
                                        kDpiRecordLen, rec);
+            if (!got)
+                allOk = false;
             s.dpiStages.append(got ? recordToDpi(rec) : 0);
+
+            uint8_t col[kDpiRecordLen] = {0};
+            const bool gotCol = readFlash(fd, OffDPIColor + st * kDpiRecordLen,
+                                          kDpiRecordLen, col);
+            if (!gotCol)
+                allOk = false;
+            s.dpiColors.append(gotCol ? recordToColor(col) : 0xFFFFFFFFu);
         }
+        s.dpiColors.resize(s.dpiStages.size());
+
+        int fps = 0;
+        readByte(OffSensorFPS20K, fps);
+        s.fps20k = fps != 0;
 
         s.reportRateHz = codeToRate(static_cast<uint8_t>(rateCode));
         s.motionSync = motion != 0;
         s.angleSnap  = angle != 0;
         s.ripple     = ripple != 0;
-        s.valid = s.reportRateHz != 0;
+        s.valid = allOk && s.reportRateHz != 0;
 
         ::close(fd);
     }
@@ -354,13 +401,16 @@ Battery readBattery(const QString &hidrawPath)
     return b;
 }
 
-bool applySettings(const QString &hidrawPath, int reportRateHz, bool angleSnap,
-                   bool rippleControl, bool motionSync, int debounceMs, int lod)
+bool applyWritable(const QString &hidrawPath, const Writable &w)
 {
-    const uint8_t rateCode = rateToCode(reportRateHz);
-    if (rateCode == 0)
-        return false;
-    if (debounceMs < 0 || debounceMs > 30 || lod < 0 || lod > 2)
+    // Validate before opening so a rejected value costs nothing.
+    uint8_t rateCode = 0;
+    if (w.reportRateHz != 0) {
+        rateCode = rateToCode(w.reportRateHz);
+        if (rateCode == 0)
+            return false;
+    }
+    if (w.lod > 2 || w.debounceMs > 30)
         return false;
 
     const int fd = openDevice(hidrawPath);
@@ -368,13 +418,37 @@ bool applySettings(const QString &hidrawPath, int reportRateHz, bool angleSnap,
         return false;
 
     bool ok = true;
-    ok &= writeValue(fd, OffReportRate, rateCode);
-    ok &= writeValue(fd, OffAngle, angleSnap ? 1 : 0);
-    ok &= writeValue(fd, OffRipple, rippleControl ? 1 : 0);
-    ok &= writeValue(fd, OffMotionSync, motionSync ? 1 : 0);
-    ok &= writeValue(fd, OffDebounceTime, static_cast<uint8_t>(debounceMs));
-    ok &= writeValue(fd, OffLOD, static_cast<uint8_t>(lod));
+    if (rateCode != 0)
+        ok &= writeValue(fd, OffReportRate, rateCode);
+    if (w.lod >= 0)
+        ok &= writeValue(fd, OffLOD, static_cast<uint8_t>(w.lod));
+    if (w.debounceMs >= 0)
+        ok &= writeValue(fd, OffDebounceTime, static_cast<uint8_t>(w.debounceMs));
+    if (w.angleSnap >= 0)
+        ok &= writeValue(fd, OffAngle, w.angleSnap ? 1 : 0);
+    if (w.ripple >= 0)
+        ok &= writeValue(fd, OffRipple, w.ripple ? 1 : 0);
+    if (w.motionSync >= 0)
+        ok &= writeValue(fd, OffMotionSync, w.motionSync ? 1 : 0);
+    if (w.fps20k >= 0)
+        ok &= writeValue(fd, OffSensorFPS20K, w.fps20k ? 1 : 0);
 
+    ::close(fd);
+    return ok;
+}
+
+bool applyDpiColor(const QString &hidrawPath, int stage, uint32_t rgb)
+{
+    if (stage < 0 || stage >= kDpiMaxStages)
+        return false;
+    uint8_t rec[4];
+    colorToRecord(rgb, rec);
+
+    const int fd = openDevice(hidrawPath);
+    if (fd < 0)
+        return false;
+    const bool ok = writeBytes(fd, OffDPIColor + stage * kDpiRecordLen, rec,
+                               kDpiRecordLen);
     ::close(fd);
     return ok;
 }
