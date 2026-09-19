@@ -11,13 +11,19 @@ index 127ff22..06e367f 100644
  
  
 diff --git a/atsx11.cpp b/atsx11.cpp
-index eaf4542..12e15d1 100644
+index eaf4542..537f9ef 100644
 --- a/atsx11.cpp
 +++ b/atsx11.cpp
-@@ -5,8 +5,10 @@
+@@ -5,8 +5,16 @@
  #include <QIcon>
  #include <QSettings>
  #include <QStyle>
++#include <QComboBox>
++#include <QGroupBox>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QPushButton>
++#include <QSpinBox>
 +#include <QTimer>
  #include <QtConcurrent/QtConcurrent>
  #include "hook.h"
@@ -25,7 +31,7 @@ index eaf4542..12e15d1 100644
  #include "settings.h"
  
  
-@@ -31,7 +33,10 @@ atsx11::atsx11(QWidget *parent)
+@@ -31,7 +39,10 @@ atsx11::atsx11(QWidget *parent)
      ui->lbl_isCharging->setEnabled(false);
      ui->btn_apply->setEnabled(false);
  
@@ -37,7 +43,7 @@ index eaf4542..12e15d1 100644
  }
  
  atsx11::~atsx11()
-@@ -53,6 +58,127 @@ void atsx11::updateInfoLabels()
+@@ -53,6 +64,294 @@ void atsx11::updateInfoLabels()
      ui->lbl_activeAngleSnapValue->setText(ui->chbox_anglesnap->isChecked() ? QStringLiteral("On") : QStringLiteral("Off"));
  }
  
@@ -71,6 +77,28 @@ index eaf4542..12e15d1 100644
 +    ui->cbox_colormodes->setToolTip(
 +        QStringLiteral("LED control is not yet supported on the X11 Ultra."));
 +
++    // The LED tile has nothing to show on this device, so give the space to the
++    // one reading people actually want at a glance.
++    ui->lbl_ledValue->setText(QStringLiteral("Active DPI"));
++    ui->lbl_infoLEDValue->setText(QStringLiteral("..."));
++
++    // The stock slider carries the X11's 4..50 key-response range. The Ultra
++    // stores a plain debounce in ms and applyUltra clamps to 0..30, so make the
++    // control match what can actually be written instead of implying 50 works.
++    ui->sld_keyresptime->setRange(0, 30);
++
++    // Sleep timing is in the Ultra's flash at OffSleepTime but the payload is
++    // not decoded, so applyUltra does not write it. Disable rather than leave
++    // sliders that look live and silently do nothing on Apply.
++    ui->sldr_sleeptime->setEnabled(false);
++    ui->sldr_deepSleepTime->setEnabled(false);
++    const QString sleepTip =
++        QStringLiteral("Sleep timing is not decoded on the X11 Ultra yet.");
++    ui->sldr_sleeptime->setToolTip(sleepTip);
++    ui->sldr_deepSleepTime->setToolTip(sleepTip);
++
++    buildUltraDpiUi();
++
 +    if (!refreshUltraUi()) {
 +        // Asleep. Poll until it wakes rather than making the user restart.
 +        if (!m_ultraWake) {
@@ -84,6 +112,103 @@ index eaf4542..12e15d1 100644
 +        m_ultraWake->start();
 +    }
 +    return true;
++}
++
++void atsx11::buildUltraDpiUi()
++{
++    if (m_dpiGroup)
++        return;
++
++    // Every widget in the .ui is absolutely placed inside a window pinned to
++    // 720x320, so there is no free space to grow into. Add the panel below the
++    // existing controls and push the Apply row and status bar down to suit.
++    m_dpiGroup = new QGroupBox(QStringLiteral("DPI"), ui->centralwidget);
++    m_dpiGroup->setGeometry(220, 280, 491, 70);
++
++    auto *row = new QHBoxLayout(m_dpiGroup);
++    row->addWidget(new QLabel(QStringLiteral("Stage"), m_dpiGroup));
++
++    m_dpiStage = new QComboBox(m_dpiGroup);
++    m_dpiStage->setMinimumWidth(165);
++    row->addWidget(m_dpiStage);
++
++    m_dpiValue = new QSpinBox(m_dpiGroup);
++    m_dpiValue->setRange(ultra::kDpiStep, ultra::kDpiMax);
++    m_dpiValue->setSingleStep(ultra::kDpiStep);
++    m_dpiValue->setSuffix(QStringLiteral(" DPI"));
++    m_dpiValue->setMinimumWidth(115);
++    m_dpiValue->setToolTip(QStringLiteral(
++        "50 to 30000 in steps of 50, then 30100 to 60000 in steps of 100."));
++    row->addWidget(m_dpiValue);
++
++    m_dpiSetActive = new QPushButton(QStringLiteral("Set active"), m_dpiGroup);
++    m_dpiSetActive->setToolTip(
++        QStringLiteral("Make this the stage the mouse is currently using."));
++    row->addWidget(m_dpiSetActive);
++    row->addStretch();
++
++    connect(m_dpiStage, qOverload<int>(&QComboBox::currentIndexChanged),
++            this, &atsx11::onDpiStageChanged);
++    connect(m_dpiValue, qOverload<int>(&QSpinBox::valueChanged),
++            this, &atsx11::onDpiValueChanged);
++    // Snap only once the field is done being edited, otherwise typing "1" on
++    // the way to 1600 gets rewritten to 50 under the cursor.
++    connect(m_dpiValue, &QAbstractSpinBox::editingFinished, this, [this]() {
++        const int snapped = ultra::snapDpi(m_dpiValue->value());
++        if (snapped != m_dpiValue->value())
++            m_dpiValue->setValue(snapped);
++    });
++    connect(m_dpiSetActive, &QPushButton::clicked, this, [this]() {
++        m_dpiCurrent = m_dpiStage->currentIndex();
++        refreshDpiCombo();
++    });
++
++    ui->verticalLayoutWidget->setGeometry(390, 358, 321, 45);
++    ui->horizontalLayoutWidget->setGeometry(0, 408, 721, 58);
++    setMinimumSize(720, 470);
++    setMaximumSize(720, 470);
++    resize(720, 470);
++}
++
++void atsx11::refreshDpiCombo()
++{
++    if (!m_dpiStage)
++        return;
++
++    const int keep = m_dpiStage->currentIndex();
++    {
++        QSignalBlocker block(m_dpiStage);
++        m_dpiStage->clear();
++        for (int i = 0; i < m_dpiPending.size(); ++i) {
++            QString label = QStringLiteral("Stage %1: %2").arg(i + 1).arg(m_dpiPending[i]);
++            if (i == m_dpiCurrent)
++                label += QStringLiteral("  (active)");
++            m_dpiStage->addItem(label, m_dpiPending[i]);
++        }
++        if (keep >= 0 && keep < m_dpiStage->count())
++            m_dpiStage->setCurrentIndex(keep);
++    }
++    if (m_dpiSetActive)
++        m_dpiSetActive->setEnabled(m_dpiStage->currentIndex() != m_dpiCurrent);
++}
++
++void atsx11::onDpiStageChanged(int index)
++{
++    if (index < 0 || index >= m_dpiPending.size())
++        return;
++    QSignalBlocker block(m_dpiValue);
++    m_dpiValue->setValue(m_dpiPending[index]);
++    if (m_dpiSetActive)
++        m_dpiSetActive->setEnabled(index != m_dpiCurrent);
++}
++
++void atsx11::onDpiValueChanged(int dpi)
++{
++    const int stage = m_dpiStage ? m_dpiStage->currentIndex() : -1;
++    if (stage < 0 || stage >= m_dpiPending.size())
++        return;
++    m_dpiPending[stage] = dpi;   // snapped on editingFinished and again on Apply
++    refreshDpiCombo();
 +}
 +
 +bool atsx11::refreshUltraUi()
@@ -105,8 +230,33 @@ index eaf4542..12e15d1 100644
 +        ui->cbox_pollingrate->setCurrentIndex(idx);
 +    ui->chbox_anglesnap->setChecked(s.angleSnap);
 +    ui->chbox_rippleCTRL->setChecked(s.ripple);
++
++    // Show the debounce the mouse actually holds. Without this the slider sits
++    // at its minimum and Apply quietly writes that over whatever was set.
++    const int debounce = qBound(ui->sld_keyresptime->minimum(), s.debounceMs,
++                                ui->sld_keyresptime->maximum());
++    ui->sld_keyresptime->setValue(debounce);
++    ui->lbl_kreptimeValueDisplay->setText(
++        QString::number(debounce) + QStringLiteral(" ms"));
++
 +    ui->btn_apply->setEnabled(true);
 +    updateInfoLabels();
++
++    if (m_dpiGroup) {
++        const bool haveDpi = !s.dpiStages.isEmpty() && !s.dpiStages.contains(0);
++        m_dpiGroup->setEnabled(haveDpi);
++        if (haveDpi) {
++            m_dpiOnDevice = s.dpiStages;
++            m_dpiPending  = s.dpiStages;
++            m_dpiCurrent  = qBound(0, s.currentDpiStage, s.dpiStages.size() - 1);
++            m_dpiCurrentOnDevice = m_dpiCurrent;
++            refreshDpiCombo();
++            m_dpiStage->setCurrentIndex(m_dpiCurrent);
++            onDpiStageChanged(m_dpiCurrent);
++            ui->lbl_infoLEDValue->setText(
++                QStringLiteral("%1").arg(m_dpiPending[m_dpiCurrent]));
++        }
++    }
 +
 +    const ultra::Battery bat = ultra::readBattery(m_ultraPath);
 +    if (bat.valid) {
@@ -153,19 +303,42 @@ index eaf4542..12e15d1 100644
 +        return;
 +    }
 +
++    // DPI is a separate write path: only the stages the user actually touched
++    // get rewritten, and the active stage only if it moved.
++    QList<ultra::DpiWrite> dpiWrites;
++    for (int i = 0; i < m_dpiPending.size() && i < m_dpiOnDevice.size(); ++i) {
++        const int want = ultra::snapDpi(m_dpiPending[i]);
++        m_dpiPending[i] = want;
++        if (want != m_dpiOnDevice[i])
++            dpiWrites.append({i, want});
++    }
++    const int wantStage = (m_dpiCurrent != m_dpiCurrentOnDevice) ? m_dpiCurrent : -1;
++    if (!dpiWrites.isEmpty() || wantStage >= 0) {
++        if (!ultra::applyDpi(m_ultraPath, dpiWrites, wantStage)) {
++            ui->lbl_debug->setText(QStringLiteral("<html><head/><body><p><span style='color:red;'>Error: failed to write DPI</span></p></body></html>"));
++            QMessageBox::warning(this, QStringLiteral("Error"),
++                                 QStringLiteral("Failed to write DPI to the X11 Ultra."));
++            return;
++        }
++    }
++
 +    // Read back so the UI shows what the device actually holds, not what we asked for.
-+    const ultra::Settings after = ultra::readSettings(m_ultraPath);
 +    saveSettings();
-+    updateInfoLabels();
++    if (!refreshUltraUi())
++        return;   // refreshUltraUi already explained itself on the status line
++
++    const int shownHz  = ui->cbox_pollingrate->currentData().toInt();
++    const int shownDpi = (m_dpiCurrent >= 0 && m_dpiCurrent < m_dpiPending.size())
++                       ? m_dpiPending[m_dpiCurrent] : 0;
 +    ui->lbl_debug->setText(QStringLiteral(
-+        "<html><head/><body><p><span style='color:green;'>Applied, device reports %1 Hz</span></p></body></html>")
-+        .arg(after.reportRateHz));
++        "<html><head/><body><p><span style='color:green;'>Applied, device reports %1 Hz at %2 DPI</span></p></body></html>")
++        .arg(shownHz).arg(shownDpi));
 +}
 +
  void atsx11::loadDeviceAndBattery(const QString &devicePath)
  {
      m_currentDevicePath = devicePath;
-@@ -137,6 +263,11 @@ void atsx11::on_btn_apply_clicked()
+@@ -137,6 +436,11 @@ void atsx11::on_btn_apply_clicked()
          return;
      }
  
@@ -178,19 +351,24 @@ index eaf4542..12e15d1 100644
      const int prate        = ui->cbox_pollingrate->currentIndex();
      const bool angleSnap   = ui->chbox_anglesnap->isChecked();
 diff --git a/atsx11.h b/atsx11.h
-index 6bb99a6..ce12734 100644
+index 6bb99a6..838c51f 100644
 --- a/atsx11.h
 +++ b/atsx11.h
-@@ -4,6 +4,8 @@
+@@ -3,6 +3,13 @@
+ 
  #include <QMainWindow>
  #include <QFutureWatcher>
- 
-+class QTimer;
++#include <QList>
 +
++class QComboBox;
++class QGroupBox;
++class QPushButton;
++class QSpinBox;
++class QTimer;
+ 
  class QCloseEvent;
  class settings;
- 
-@@ -36,12 +38,23 @@ private slots:
+@@ -36,12 +43,39 @@ private slots:
  
  private:
      void loadDeviceAndBattery(const QString &devicePath);
@@ -200,6 +378,12 @@ index 6bb99a6..ce12734 100644
 +    // answer (it sleeps when idle and stops serving config requests).
 +    bool refreshUltraUi();
 +    void applyUltra();
++    // The DPI panel does not exist in the .ui file; it is built at runtime for
++    // the Ultra only, so the plain X11 layout is left exactly as it was.
++    void buildUltraDpiUi();
++    void refreshDpiCombo();
++    void onDpiStageChanged(int index);
++    void onDpiValueChanged(int dpi);
      void loadSettings();
      void saveSettings();
      void updateInfoLabels();
@@ -211,6 +395,16 @@ index 6bb99a6..ce12734 100644
 +    bool m_isUltra = false;
 +    QString m_ultraPath;
 +    QTimer *m_ultraWake = nullptr;
++    QGroupBox   *m_dpiGroup     = nullptr;
++    QComboBox   *m_dpiStage     = nullptr;
++    QSpinBox    *m_dpiValue     = nullptr;
++    QPushButton *m_dpiSetActive = nullptr;
++    // Edited values vs what the last read found, so Apply only writes stages
++    // that actually changed.
++    QList<int> m_dpiPending;
++    QList<int> m_dpiOnDevice;
++    int m_dpiCurrent = 0;
++    int m_dpiCurrentOnDevice = 0;
      QFutureWatcher<int> *m_batteryWatcher = nullptr;
      settings *m_settings = nullptr;
  };

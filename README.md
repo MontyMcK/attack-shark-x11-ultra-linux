@@ -76,10 +76,11 @@ handshake OK  cid=124 mid=11 type=5 (wireless 8k)
 - angle snapping, ripple control, motion sync, lift off distance, debounce
 - battery level and charging state
 - raw config flash read and write if you want to poke at it yourself
-- dpi stage encoding. it round trips cleanly across all 900 valid values and it
-  reproduces my mouse's existing bytes exactly, so i trust the codec. i have not
-  sat there writing every stage and reading it back though, so treat writes as
-  less proven than reads
+- dpi, read and write, 50 up to 60000. the codec round trips all 900 valid
+  values and reproduces my mouse's six existing stage records byte for byte.
+  writes are verified on hardware too: stage 0 moved 800 to 850, landed as
+  exactly the bytes the encoder predicts, read back as 850, and writing 800
+  again restored the original record byte for byte
 
 ## what doesn't
 
@@ -89,6 +90,8 @@ handshake OK  cid=124 mid=11 type=5 (wireless 8k)
   alone rather than write bytes i do not understand into flash
 - macros and key remapping. the offsets are in the eeprom map, the payload format
   is not worked out
+- sleep and deep sleep timers. same story, `SleepTime` is in the map but i have
+  not decoded what it wants
 
 ## gotchas that will waste your time
 
@@ -130,9 +133,20 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```
 
 it detects the ultra, swaps the polling rate list for the full seven entries,
-greys out the colour dropdown since that is not decoded, and leaves his x11 path
-completely untouched when an ultra is not plugged in. it also skips the pkexec
-prompt on the ultra, which does not need root once the udev rule is in.
+adds a DPI panel where you pick a stage, set its value and mark which stage the
+mouse is actually using, and puts the active DPI in the tile the LED readout was
+wasting. his x11 path is completely untouched when an ultra is not plugged in.
+it also skips the pkexec prompt on the ultra, which does not need root once the
+udev rule is in.
+
+apply only rewrites the stages you actually changed, and every value is checked
+before the device is opened, so a bad entry cannot leave you with half a stage
+table written.
+
+the colour dropdown and the sleep sliders are greyed out rather than left
+looking live. they are in the eeprom map but the payloads are not decoded, and a
+control that silently does nothing when you hit apply is worse than one that
+tells you it cannot.
 
 i have not sent this upstream yet.
 
